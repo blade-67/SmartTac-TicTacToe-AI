@@ -5,7 +5,7 @@ from constants import (
     WHITE, BLACK, RED, BLUE, GREEN,
     PLAYER, AI, FONT_NAME, FONT_SIZE
 )
-from ai_engine import check_winner, available_moves, best_move
+from ai_engine import check_winner, available_moves, best_move, ai_learning
 import time
 
 class Board:
@@ -15,6 +15,23 @@ class Board:
         # Create main frame to hold all widgets
         self.main_frame = tk.Frame(root)
         self.main_frame.pack(expand=True, fill='both', padx=20, pady=20)
+        
+        def on_resize(event=None):
+            # Update the canvas size while maintaining the aspect ratio
+            frame_width = self.main_frame.winfo_width() - 40  # Account for padding
+            frame_height = self.main_frame.winfo_height() - 140  # Account for controls
+            
+            # Maintain square aspect ratio
+            size = min(frame_width, frame_height)
+            if size >= SCREEN_WIDTH:  # Don't scale up beyond original size
+                size = SCREEN_WIDTH
+                
+            if hasattr(self, 'canvas'):
+                self.canvas.config(width=size, height=size)
+                self.draw_board()  # Redraw the board
+                
+        # Bind resize event
+        self.root.bind('<Configure>', on_resize)
         
         # Create game area frame
         self.game_area = tk.Frame(self.main_frame)
@@ -128,61 +145,110 @@ class Board:
 
     def handle_click(self, event):
         """Handle mouse click events"""
+        # Ignore clicks if game is over or it's not player's turn
         if self.game_over or self.current_player != PLAYER:
             return
             
-        col = event.x // CELL_SIZE
-        row = event.y // CELL_SIZE
+        # Convert click coordinates to grid position
+        try:
+            col = event.x // CELL_SIZE
+            row = event.y // CELL_SIZE
+        except (AttributeError, TypeError):
+            return  # Invalid click event
         
-        if 0 <= row < BOARD_SIZE and 0 <= col < BOARD_SIZE:
-            if self.grid[row][col] is None:
-                # Player's move
-                self.grid[row][col] = PLAYER
-                self.draw_board()
-                
-                if self.check_game_end():
-                    return
-                    
-                # AI's turn
-                self.current_player = AI
-                self.status_label.config(text="AI is thinking...")
-                self.root.update()
-                
-                # Add a small delay to make AI's move visible
-                self.root.after(500, self.ai_move)
+        # Validate click position and cell availability
+        if not (0 <= row < BOARD_SIZE and 0 <= col < BOARD_SIZE):
+            return  # Click outside grid
+        if self.grid[row][col] is not None:
+            return  # Cell already occupied
+            
+        # Make player's move
+        self.grid[row][col] = PLAYER
+        self.draw_board()
+        
+        # Check if game ended after player's move
+        if self.check_game_end():
+            return
+            
+        # Prepare for AI's turn
+        self.current_player = AI
+        self.status_label.config(text="AI is thinking...")
+        self.root.update()
+        
+        # Schedule AI's move with a delay
+        self.root.after(500, self._safe_ai_move)
+    
+    def _safe_ai_move(self):
+        """Protected method to safely execute AI's move"""
+        try:
+            if self.game_over or self.current_player != AI:
+                return
+            self.ai_move()
+        except Exception as e:
+            print(f"Error during AI move: {e}")
+            self.current_player = PLAYER
+            self.status_label.config(text="Your turn (X)")
 
     def ai_move(self):
         """Handle AI's move"""
-        move = best_move(self.grid)
-        if move:
-            row, col = move
-            self.grid[row][col] = AI
-            self.draw_board()
+        if self.game_over or self.current_player != AI:
+            return
             
-            if not self.check_game_end():
-                self.current_player = PLAYER
-                self.status_label.config(text="Your turn (X)")
+        move = best_move(self.grid)
+        if not move:  # No valid moves available
+            self.check_game_end()  # Will handle tie game
+            return
+            
+        row, col = move
+        # Validate move before applying
+        if not (0 <= row < BOARD_SIZE and 0 <= col < BOARD_SIZE):
+            print(f"Invalid AI move: ({row}, {col})")
+            return
+        if self.grid[row][col] is not None:
+            print(f"AI attempted to move to occupied cell: ({row}, {col})")
+            return
+            
+        # Make AI's move
+        self.grid[row][col] = AI
+        self.draw_board()
+        
+        # Check game end and update state
+        if not self.check_game_end():
+            self.current_player = PLAYER
+            self.status_label.config(text="Your turn (X)")
 
     def check_game_end(self):
         """Check if the game has ended"""
-        winner = check_winner(self.grid)
-        if winner:
-            self.game_over = True
-            if winner == PLAYER:
-                self.player_score += 1
-                self.status_label.config(text="You win!")
-            else:
-                self.ai_score += 1
-                self.status_label.config(text="AI wins!")
-            self.update_score_labels()
-            return True
-            
-        if not available_moves(self.grid):
-            self.game_over = True
-            self.status_label.config(text="It's a tie!")
-            return True
-            
-        return False
+        try:
+            # Check for winner
+            winner = check_winner(self.grid)
+            if winner:
+                self.game_over = True
+                if winner == PLAYER:
+                    self.player_score += 1
+                    self.status_label.config(text="You win!")
+                    # AI learns from loss
+                    ai_learning.learn_from_game(False)
+                else:
+                    self.ai_score += 1
+                    self.status_label.config(text="AI wins!")
+                    # AI learns from win
+                    ai_learning.learn_from_game(True)
+                self.update_score_labels()
+                return True
+                
+            # Check for tie
+            if not available_moves(self.grid):
+                self.game_over = True
+                self.status_label.config(text="It's a tie!")
+                # AI learns from tie (consider it a partial success)
+                ai_learning.learn_from_game(True)
+                return True
+                
+            return False
+        except Exception as e:
+            print(f"Error checking game end: {e}")
+            return False
 
     def update_score_labels(self):
         """Update the score display"""
